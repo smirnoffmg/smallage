@@ -13,8 +13,34 @@ application's own configuration. `--consumer` names the worker.
 
 **Consumer names must be unique per running worker.** Redis groups pending
 entries by consumer name, and reclaim uses that name to tell its own work from a
-peer's. The default appends a random suffix to `consumer_prefix`; if you set the
-name yourself, keep it unique per process.
+peer's. The default appends a random suffix to `consumer_prefix` per process
+start, which is correct for any number of replicas; leave `consumer` unset
+unless you have a reason.
+
+The hazard is setting it in code. `QueueConfig(consumer="worker")` is one
+literal shared by every replica of the deployment, and nothing fails loudly:
+each worker skips entries pending under its own name as work it is running
+itself, so when one replica dies, the others never reclaim what it held. Its
+entries sit in the pending list until some worker restarts and takes them back
+as its own orphans.
+
+To name workers yourself, take the name from the environment rather than the
+config literal. `--consumer` overrides the config, and under Kubernetes the pod
+name is unique among running pods and arrives through the downward API:
+
+```yaml
+env:
+  - name: POD_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: metadata.name
+command: ["litestar", "workers", "run", "--consumer", "$(POD_NAME)"]
+```
+
+A name that survives a container restart inside the same pod is an advantage
+rather than a risk: the restarted worker finds the entries left under its name
+at startup and takes them back at once, instead of waiting for them to be
+reclaimed.
 
 ### What starts with it
 

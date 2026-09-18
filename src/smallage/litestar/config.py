@@ -38,6 +38,7 @@ class QueueConfig:
 
     Must be unique per running worker: Redis groups pending entries by consumer
     name, and reclaim uses that name to tell a worker's own work from a peer's.
+    A literal here is shared by every replica; take it from the environment.
     `--consumer` sets this, which is how the name survives being settled before
     the application's lifespan opens the queue.
     """
