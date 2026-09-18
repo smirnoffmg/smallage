@@ -76,11 +76,25 @@ application that must not repeat a side effect needs a gate it controls:
 await charge.enqueue(invoice_id=invoice_id, dedup=f"charge:{invoice_id}")
 ```
 
-The worker claims the key with `SET NX PX` immediately before calling the
-handler. A job whose key is already taken is skipped and acknowledged, not
-failed. The check sits there because that is the only point a duplicate can
-still be stopped — by the time a worker has the job, both copies are already in
-the stream.
+The worker claims the key immediately before calling the handler. The check sits
+there because that is the only point a duplicate can still be stopped — by the
+time a worker has the job, both copies are already in the stream.
+
+The key has two states, and its owner is the job id:
+
+- **claimed** while the job is being attempted. The same job passes its own
+  claim, so a retry after a failure, or a reclaim after its worker died, runs as
+  it should. A different job with the same key is skipped and acknowledged, not
+  failed.
+- **done** once the handler has returned. Nothing passes it, including the job
+  that wrote it: a worker that finished and died before its ack brings the same
+  job id back, and that copy is skipped.
+
+A job that ends in the dead letter queue releases its claim, so replaying it is
+not turned away for the rest of the window. The one gap left is a worker dying
+between the handler returning and the key being marked done: that job runs
+again. Narrowing it further takes a transaction shared with the side effect,
+which only the application has.
 
 The window is `WorkerConfig.dedup_ttl_ms`, one day by default. Choose it to
 cover the longest period over which a repeat would be wrong, not the longest a

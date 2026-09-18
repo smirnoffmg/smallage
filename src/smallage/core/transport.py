@@ -247,12 +247,23 @@ class RedisStreamsTransport:
         """Win the right to run this key, or report that someone already has.
 
         The guarantee is at-least-once, so an application that must not repeat a
-        side effect needs a gate it controls. This is that gate.
+        side effect needs a gate it controls. This is that gate. The owner's own
+        claim lets it back in, so a retry is not mistaken for a duplicate.
         """
-        won = await self.control.set(
-            dedup_key(self.namespace, key), owner, nx=True, px=ttl_ms
+        won = await self._scripts.dedup_claim(
+            keys=[dedup_key(self.namespace, key)], args=[owner, ttl_ms]
         )
         return bool(won)
+
+    async def complete_dedup(self, key: str, *, owner: str, ttl_ms: int) -> None:
+        await self._scripts.dedup_complete(
+            keys=[dedup_key(self.namespace, key)], args=[owner, ttl_ms]
+        )
+
+    async def release_dedup(self, key: str, *, owner: str) -> None:
+        await self._scripts.dedup_release(
+            keys=[dedup_key(self.namespace, key)], args=[owner]
+        )
 
     async def ack(self, stream: str, entry_ids: Sequence[bytes]) -> int:
         if not entry_ids:

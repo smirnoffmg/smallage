@@ -371,3 +371,80 @@ async def test_a_dedup_key_lets_only_one_copy_run(
             await reached_marker.wait()
 
     assert ran == ["job-a"], f"the gate let through: {ran}"
+
+
+async def test_a_dedup_job_that_fails_is_retried_not_skipped(
+    transport: RedisStreamsTransport, scheduler: RedisScheduler
+) -> None:
+    """The retry must get past the claim its own first attempt left behind."""
+    await transport.enqueue(
+        Envelope(
+            id="job-1",
+            task="reindex",
+            payload=b"{}",
+            enqueued_at=1712345678901,
+            dedup="invoice-42",
+        ),
+        queue=transport.queues[0],
+    )
+    attempts: list[int] = []
+    ran_twice = anyio.Event()
+    stop = anyio.Event()
+
+    async def handler(envelope_: Envelope) -> None:
+        attempts.append(envelope_.attempt)
+        if len(attempts) == 1:
+            raise RuntimeError("gateway timeout")
+        ran_twice.set()
+
+    with anyio.fail_after(30):
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(
+                partial(
+                    run,
+                    transport,
+                    {"reindex": handler},
+                    retrying(),
+                    scheduler=scheduler,
+                    shutdown=stop,
+                )
+            )
+            await ran_twice.wait()
+            stop.set()
+
+    assert attempts == [0, 1]
+
+
+async def test_a_redelivered_copy_of_a_finished_dedup_job_is_skipped(
+    transport: RedisStreamsTransport, scheduler: RedisScheduler
+) -> None:
+    """Same job id twice: what a lost ack looks like once the entry is reclaimed."""
+    job = Envelope(
+        id="job-1",
+        task="reindex",
+        payload=b"{}",
+        enqueued_at=1712345678901,
+        dedup="invoice-42",
+    )
+    await transport.enqueue(job, queue=transport.queues[0])
+    await transport.enqueue(job, queue=transport.queues[0])
+    await transport.enqueue(
+        Envelope(id="marker", task="marker", payload=b"{}", enqueued_at=1712345678901),
+        queue=transport.queues[0],
+    )
+
+    ran: list[str] = []
+    reached_marker = anyio.Event()
+
+    async def handler(envelope_: Envelope) -> None:
+        ran.append(envelope_.id)
+
+    async def marker(envelope_: Envelope) -> None:
+        reached_marker.set()
+
+    registry = {"reindex": handler, "marker": marker}
+    with anyio.fail_after(30):
+        async with worker_running(transport, registry, config(), scheduler=scheduler):
+            await reached_marker.wait()
+
+    assert ran == ["job-1"]

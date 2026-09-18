@@ -9,8 +9,10 @@ preference. Violating any invariant here is a bug, not a trade-off.
 completed its side effect and died before `XACK` will be reclaimed and the work
 repeated. No amount of protocol work removes that — only an idempotent handler
 does. The library gives you a gate for it: a `dedup` key on the record, claimed
-by the worker with `SET NX PX` immediately before the handler is called. A key
-already taken means the job is skipped and acknowledged. Treating delivery as
+by the worker immediately before the handler is called and marked done once it
+returns. The job id owns the claim, so the job's own retries and reclaims pass
+it; a key held by another job, or marked done, means the job is skipped and
+acknowledged. Burying a job releases its claim. Treating delivery as
 exactly-once is a design error in the application, not a bug here.
 
 ## What this is

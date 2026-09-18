@@ -68,6 +68,12 @@ def record(entry_id: bytes, task: str = "reindex") -> Record:
     )
 
 
+def guarded(entry_id: bytes, key: str = "invoice-42") -> Record:
+    rec = record(entry_id)
+    rec.fields[b"dedup"] = key.encode()
+    return rec
+
+
 def pending(
     entry_id: bytes, times_delivered: int = 1, consumer: str = "peer"
 ) -> Pending:
@@ -141,6 +147,9 @@ class FakeTransport:
         self.buried: list[tuple[bytes, str, str]] = []
         self.dedup_claims: list[str] = []
         self.dedup_taken: set[str] = set()
+        self.dedup_completed: list[tuple[str, str]] = []
+        self.dedup_released: list[tuple[str, str]] = []
+        self.reclaimable_records: dict[bytes, Record] = {}
         self.reported_lag: int | None = 0
         self.external: set[str] = set()
         self.events: list[str] = []
@@ -184,8 +193,17 @@ class FakeTransport:
         self.dedup_claims.append(key)
         return key not in self.dedup_taken
 
+    async def complete_dedup(self, key: str, *, owner: str, ttl_ms: int) -> None:
+        self.dedup_completed.append((key, owner))
+        self.events.append("dedup_done")
+
+    async def release_dedup(self, key: str, *, owner: str) -> None:
+        self.dedup_released.append((key, owner))
+        self.events.append("dedup_released")
+
     async def ack(self, stream: str, entry_ids: Sequence[bytes]) -> int:
         self.acked.append((stream, list(entry_ids)))
+        self.events.append("ack")
         return len(entry_ids)
 
     async def pending(self, *, count: int, min_idle_ms: int) -> list[Pending]:
@@ -201,7 +219,9 @@ class FakeTransport:
     async def reclaim(
         self, stream: str, entry_id: bytes, *, min_idle_ms: int, ttl_ms: int
     ) -> list[Record]:
-        return [record(entry_id)] if entry_id in self.claimable else []
+        if entry_id not in self.claimable:
+            return []
+        return [self.reclaimable_records.get(entry_id, record(entry_id))]
 
     async def trim(self, *, retention_ms: int) -> None:
         self.trimmed += 1
@@ -775,6 +795,112 @@ async def test_a_job_without_a_dedup_key_is_not_gated() -> None:
 
     assert ran == ["1-0"]
     assert transport.dedup_claims == []
+
+
+async def test_a_finished_dedup_job_marks_its_key_done_before_the_ack() -> None:
+    """Done, not merely claimed: a copy redelivered after a lost ack must not run.
+
+    Marking after the ack would leave a window where the entry is gone but the key
+    still admits its owner.
+    """
+    transport = FakeTransport()
+    slots = Slots()
+    slots.take([b"1-0"])
+
+    async def handler(envelope: Envelope) -> None:
+        return None
+
+    await _run_one(
+        transport,
+        FakeScheduler(),
+        None,
+        {"reindex": handler},
+        {},
+        slots,
+        WorkerConfig(),
+        WorkerStats(),
+        guarded(b"1-0"),
+    )
+
+    assert transport.dedup_completed == [("invoice-42", "1-0")]
+    assert transport.events.index("dedup_done") < transport.events.index("ack")
+
+
+async def test_a_failed_dedup_job_keeps_its_claim_for_the_retry() -> None:
+    """The retry carries the same job id, so the claim it left behind admits it."""
+    transport = FakeTransport()
+    scheduler = FakeScheduler()
+    slots = Slots()
+    slots.take([b"1-0"])
+
+    async def handler(envelope: Envelope) -> None:
+        raise RuntimeError("gateway timeout")
+
+    await _run_one(
+        transport,
+        scheduler,
+        None,
+        {"reindex": handler},
+        {},
+        slots,
+        WorkerConfig(retry=RetryPolicy(max_attempts=3)),
+        WorkerStats(),
+        guarded(b"1-0"),
+    )
+
+    [(retried, _, _)] = scheduler.scheduled
+    assert retried.dedup == "invoice-42"
+    assert retried.id == "1-0"
+    assert transport.dedup_completed == []
+    assert transport.dedup_released == []
+
+
+async def test_a_dedup_job_out_of_attempts_releases_its_key() -> None:
+    """A buried job must not keep the key, or its replay is turned away for a day."""
+    transport = FakeTransport()
+    slots = Slots()
+    slots.take([b"1-0"])
+    spent = guarded(b"1-0")
+    spent.fields[b"attempt"] = b"2"
+
+    async def handler(envelope: Envelope) -> None:
+        raise RuntimeError("boom")
+
+    await _run_one(
+        transport,
+        FakeScheduler(),
+        None,
+        {"reindex": handler},
+        {},
+        slots,
+        WorkerConfig(retry=RetryPolicy(max_attempts=3)),
+        WorkerStats(),
+        spent,
+    )
+
+    assert transport.dedup_released == [("invoice-42", "1-0")]
+    assert transport.dedup_completed == []
+    assert transport.events.index("dedup_released") < transport.events.index("ack")
+
+
+async def test_an_over_delivered_dedup_entry_releases_its_key() -> None:
+    transport = FakeTransport(
+        pending=[pending(b"7-0", times_delivered=9)], claimable={b"7-0"}
+    )
+    transport.reclaimable_records[b"7-0"] = guarded(b"7-0")
+    sleep = StopAfter(1)
+
+    with pytest.raises(_StopLoop):
+        await _reclaim_loop(
+            transport,
+            Slots(),
+            WorkerConfig(retry=RetryPolicy(max_deliveries=5)),
+            sleep,
+            lambda rec: None,
+            WorkerStats(),
+        )
+
+    assert transport.dedup_released == [("invoice-42", "7-0")]
 
 
 class FakeResults:

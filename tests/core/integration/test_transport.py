@@ -226,6 +226,66 @@ async def test_a_dedup_key_can_be_claimed_once(
     assert await transport.claim_dedup("invoice-43", owner="b", ttl_ms=60_000) is True
 
 
+async def test_the_owner_of_a_dedup_claim_is_let_back_in(
+    transport: RedisStreamsTransport,
+) -> None:
+    """A retry or a reclaim carries the same job id and must pass its own gate."""
+    assert await transport.claim_dedup("invoice-42", owner="a", ttl_ms=60_000) is True
+    assert await transport.claim_dedup("invoice-42", owner="a", ttl_ms=60_000) is True
+    assert await transport.claim_dedup("invoice-42", owner="b", ttl_ms=60_000) is False
+
+
+async def test_a_done_dedup_key_turns_away_its_own_owner_too(
+    transport: RedisStreamsTransport,
+) -> None:
+    """The copy redelivered after a lost ack has the same id as the one that ran."""
+    await transport.claim_dedup("invoice-42", owner="a", ttl_ms=60_000)
+    await transport.complete_dedup("invoice-42", owner="a", ttl_ms=60_000)
+
+    assert await transport.claim_dedup("invoice-42", owner="a", ttl_ms=60_000) is False
+
+
+async def test_only_the_owner_can_finish_or_release_a_dedup_claim(
+    transport: RedisStreamsTransport,
+) -> None:
+    await transport.claim_dedup("invoice-42", owner="a", ttl_ms=60_000)
+    await transport.complete_dedup("invoice-42", owner="b", ttl_ms=60_000)
+    await transport.release_dedup("invoice-42", owner="b")
+
+    assert await transport.claim_dedup("invoice-42", owner="a", ttl_ms=60_000) is True
+
+    await transport.release_dedup("invoice-42", owner="a")
+
+    assert await transport.claim_dedup("invoice-42", owner="c", ttl_ms=60_000) is True
+
+
+async def test_racing_owners_of_one_dedup_key_let_exactly_one_through(
+    transport: RedisStreamsTransport,
+) -> None:
+    won: list[str] = []
+
+    async def claim(owner: str) -> None:
+        if await transport.claim_dedup("invoice-42", owner=owner, ttl_ms=60_000):
+            won.append(owner)
+
+    async with anyio.create_task_group() as tg:
+        for n in range(20):
+            tg.start_soon(claim, f"job-{n}")
+
+    assert len(won) == 1
+
+
+async def test_a_done_dedup_key_is_not_released(
+    transport: RedisStreamsTransport,
+) -> None:
+    """Release is for work that never happened; finished work keeps its key."""
+    await transport.claim_dedup("invoice-42", owner="a", ttl_ms=60_000)
+    await transport.complete_dedup("invoice-42", owner="a", ttl_ms=60_000)
+    await transport.release_dedup("invoice-42", owner="a")
+
+    assert await transport.claim_dedup("invoice-42", owner="b", ttl_ms=60_000) is False
+
+
 async def test_external_streams_share_the_group_and_the_worker(
     redis_url: str, namespace: str
 ) -> None:

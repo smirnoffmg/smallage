@@ -13,6 +13,9 @@ SCRIPT_NAMES = (
     "ack",
     "reclaim",
     "sweep_consumers",
+    "dedup_claim",
+    "dedup_complete",
+    "dedup_release",
     "promote",
     "renew_leader",
     "release_leader",
@@ -28,6 +31,9 @@ class TransportScripts:
     ack: AsyncScript
     reclaim: AsyncScript
     sweep_consumers: AsyncScript
+    dedup_claim: AsyncScript
+    dedup_complete: AsyncScript
+    dedup_release: AsyncScript
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +48,9 @@ def register_transport(client: Redis) -> TransportScripts:
         ack=client.register_script(load_script("ack")),
         reclaim=client.register_script(load_script("reclaim")),
         sweep_consumers=client.register_script(load_script("sweep_consumers")),
+        dedup_claim=client.register_script(load_script("dedup_claim")),
+        dedup_complete=client.register_script(load_script("dedup_complete")),
+        dedup_release=client.register_script(load_script("dedup_release")),
     )
 
 

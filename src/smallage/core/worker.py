@@ -284,6 +284,10 @@ async def _run_one(
 
         value = await handler(envelope)
         stats.handled += 1
+        if envelope.dedup is not None:
+            await transport.complete_dedup(
+                envelope.dedup, owner=envelope.id, ttl_ms=cfg.dedup_ttl_ms
+            )
         await _keep_result(
             results, envelope, TaskResult(ok=True, value=_encoded(value))
         )
@@ -337,7 +341,9 @@ async def _may_run(
     """Gate a job on its deduplication key, if it carries one.
 
     Checked here rather than at enqueue: delivery is at-least-once, so the only
-    place a duplicate can be stopped is immediately before the side effect.
+    place a duplicate can be stopped is immediately before the side effect. The
+    job id is the owner, so this job's own retries and reclaims pass; the key
+    turns everyone away only once the handler has returned.
     """
     if envelope.dedup is None:
         return True
@@ -501,7 +507,20 @@ async def _dead_letter(
         record, reason=reason, detail=detail, times_delivered=times_delivered
     )
     stats.bury(reason)
+    await _release_dedup(transport, record)
     await transport.ack(record.stream, [record.entry_id])
+
+
+async def _release_dedup(transport: StreamTransport, record: Record) -> None:
+    """A buried job's claim must not outlive it, or its replay is turned away."""
+    if transport.is_external(record.stream):
+        return
+    try:
+        envelope = from_fields(record.fields)
+    except MalformedEnvelope:
+        return
+    if envelope.dedup is not None:
+        await transport.release_dedup(envelope.dedup, owner=envelope.id)
 
 
 async def _heartbeat_loop(
