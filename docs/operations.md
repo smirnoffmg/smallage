@@ -176,6 +176,14 @@ a Sentinel failover looks like from inside a worker.
 does, the entry is left unacked — the safe outcome, because reclaim is exactly
 the mechanism for entries whose owner stopped responding.
 
+**A dead worker's work comes back in tens of seconds, not one TTL.** Reclaim
+needs both the entry's alive key gone and the entry idle for `min_idle_ms` since
+it was delivered; the heartbeat refreshes the key but not the idle time. At the
+defaults, a job that had been running for a while returns 20 to 35 seconds after
+its worker dies — the TTL expiring plus a reclaim pass — and one that had just
+started returns after up to 65, because the 60 s floor has not yet run out.
+`min_idle_ms` is what bounds the worst case.
+
 **A worker never reclaims what Redis just served it.** An entry joins the
 pending list the moment Redis executes `XREADGROUP`, before the reply reaches
 the worker, so ownership rather than timing is what decides. Entries left under

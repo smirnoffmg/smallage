@@ -41,7 +41,15 @@ signal. A worker holds `SET {ns}:alive:<entry> PX ttl` per entry it is running
 and refreshes it from the supervisor rather than from the task body, so the
 refresh keeps happening while the handler is busy. Reclaim is a Lua script that
 checks the key is *absent* before `XCLAIM`. A task may run for an hour without
-anyone taking it, and a worker that dies is noticed within one TTL.
+anyone taking it.
+
+A dead worker's entry comes back once both conditions hold: its alive key has
+expired, and it has been idle for `min_idle_ms` since it was delivered. At the
+defaults — a 30 s TTL refreshed every 10 s, a 60 s floor, a reclaim pass every
+5 s — that is 20 to 35 seconds for a job that had been running a while, and up
+to 65 for one that had only just started. The floor, not the TTL, bounds the
+worst case. Against taskiq-redis's ten minutes that is still an order of
+magnitude.
 
 The cost is honest: an extra key per in-flight entry and a refresh loop. The
 benefit is that "how long may a task run" and "how fast do we notice a death"
