@@ -19,6 +19,9 @@ through the native plugin protocol.
 
 *Smallage is the old name for wild celery.*
 
+**Status:** maintained, feature-complete. Bugs and correctness issues get fixed;
+new features and other backends are not planned.
+
 📖 **[Documentation](https://smirnoffmg.dev/smallage/)**
 
 ## Features
